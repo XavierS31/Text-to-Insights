@@ -36,15 +36,22 @@ The [Zotero downloader](SponsorPrototype/README.md) retrieves 20 papers each fro
 Si-PERC, Si-SHJ, and Si-TOPCon using read-only requests. The sponsor's original
 LLM-to-parser-to-CSV extraction code is unchanged.
 
+The separate [structured CSV extractor](SponsorPrototype/README.md#structured-csv-extractor)
+requests schema-constrained JSON from local Ollama, saves raw responses for debugging,
+and incrementally writes a CSV with source metadata and an explicit status for every
+processed paper. Run `.\.venv\Scripts\python.exe SponsorPrototype/extract_csv.py`
+to process the downloaded corpus; add `--limit 1` to try a single paper first.
+
 The [local extraction dashboard](SponsorPrototype/README.md#extraction-dashboard) shows
-the downloaded paper queue, live Gemma progress, pending parsed responses, accepted
-values, and the original 27-column CSV. Its native start, stop, results, download,
+the downloaded paper queue, live Gemma progress, grouped article fields, extraction
+status, and downloadable CSV results. Its native start, stop, results, download,
 collection-filter, and paper-selection controls follow the supplied dashboard design
-reference. The Marimo theme was removed, and the trace observer runs the original
-extractor without changing extraction or CSV output. Follow the linked setup steps,
+reference. The dashboard defaults to the structured CSV extractor; the original
+extractor remains available with `--extractor original`. Follow the linked setup steps,
 run `.\.venv\Scripts\python.exe SponsorPrototype/dashboard/server.py`, and open
-`http://127.0.0.1:2718/`. CSV downloads return the original file's exact bytes; all-`N/A`
-responses and runs with no accepted results retain the sponsor's original behavior.
+`http://127.0.0.1:2718/`. Add `--import-csv .extraction-runs/sample/pv_extraction_results.csv`
+to open the saved one-document result. The Results view preserves partial statuses,
+distinguishes the displayed run from the corpus, and downloads the saved CSV's exact bytes.
 
 ## Proposed End-to-End Workflow
 

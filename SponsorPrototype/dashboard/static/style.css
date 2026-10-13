@@ -271,6 +271,29 @@ progress::-moz-progress-bar{background:#557027;
   margin-top:5px}
 .status-dot.model,.status-dot.extracted,.status-dot.reading{background:var(--lime)}
 .status-dot.no_result,.status-dot.stopped,.status-dot.interrupted{background:#c3a17b}
+.status-dot.partial,.status-dot.partial_no_data,.status-dot.no_data,.status-dot.no_text,.status-dot.failed{background:#c3a17b}
+.status-dot.not_run{background:#89958d}
+.status-pill.warning{background:#f1dfb7;color:#664617}
+.workspace.result-detail{grid-template-columns:minmax(0,1fr);margin-top:18px}
+.workspace.result-detail .paper-pane{display:none}
+.result-detail .detail-pane h2{max-width:70ch}
+.result-detail .values{max-height:none}
+.result-detail .field-group{margin-top:22px}
+.field-group h4{font-size:13px;font-weight:600;margin:18px 0 6px}
+.detail-actions{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;margin-bottom:20px}
+.detail-actions button{flex-shrink:0}
+.review-note{font-size:12px;line-height:1.6;color:#354e5b;max-width:85ch}
+.results-panel .review-note{margin-bottom:18px;color:var(--muted)}
+.paper-diagnostics{margin-top:20px;font-size:12px}
+.paper-diagnostics summary{cursor:pointer;min-height:30px;font-weight:600}
+.paper-diagnostics pre{white-space:pre-wrap;max-height:220px;overflow:auto;padding:14px;background:#c9d9e2;border-radius:8px}
+.paper-diagnostics blockquote{margin:8px 0;line-height:1.7;max-width:85ch}
+.results-panel table{width:100%;table-layout:fixed}
+.results-panel th,.results-panel td{min-width:0;max-width:none;padding:12px;white-space:normal}
+.results-panel th:first-child{width:44%}
+.results-panel th:nth-child(3){width:18%}
+.result-paper{min-height:32px;padding:0;background:transparent;border:0;border-radius:4px;text-align:left;font-size:12px;text-decoration:underline;text-underline-offset:3px;font-weight:600}
+.result-paper[aria-pressed=true]{text-decoration-thickness:2px}
 .detail-pane{min-width:0;
   background:var(--detail);
   border-radius:18px;
@@ -430,6 +453,8 @@ h1{font-size:34px}
 .results-panel{padding:20px}
 .results-heading{align-items:start;
   flex-direction:column}
+.detail-actions{flex-direction:column;gap:12px}
+.results-panel table{table-layout:auto;min-width:660px}
 footer{flex-direction:column;
   gap:6px}
 .collection-stat strong{font-size:27px}

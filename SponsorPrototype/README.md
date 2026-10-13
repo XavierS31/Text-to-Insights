@@ -1,4 +1,4 @@
-# Sponsor prototype and read-only Zotero retrieval
+# Sponsor prototype, Zotero retrieval, and CSV extraction
 
 The sponsor's original extraction architecture is unchanged:
 
@@ -7,6 +7,69 @@ The sponsor's original extraction architecture is unchanged:
 The added downloader is a separate ingestion step. It does not call an LLM, parse article
 text, select extraction results, or generate CSV files. Original prompts, schema, chunking,
 result selection, and CSV columns remain in `PV-Work/mainScript/extraction.py`.
+
+## Structured CSV extractor
+
+`extract_csv.py` is a separate command for the downloaded corpus. It calls local
+Ollama directly with an enforced JSON schema for the same 27 article fields and
+an exact source quote for cell performance. It validates the object, checks the quote
+and reported numbers against the excerpt, and retries failed/invalid responses once. It saves
+one CSV row per processed PDF, including rows with no data or extraction errors.
+The sponsor's original extractor is unchanged. The dashboard defaults to the new
+structured worker; `--extractor original` selects the preserved observer instead.
+
+From the repository root, with Ollama running:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r SponsorPrototype/requirements-extraction.txt
+ollama pull gemma3:1b
+# Try one paper first:
+.\.venv\Scripts\python.exe SponsorPrototype/extract_csv.py --limit 1
+# Process the entire downloaded corpus:
+.\.venv\Scripts\python.exe SponsorPrototype/extract_csv.py
+```
+
+The script reads `PDF_DIR` from `.env` (default `pdf/`) and uses titles, DOIs, and
+collections from `manifest.json`. A normal PDF folder is also supported:
+
+```powershell
+.\.venv\Scripts\python.exe SponsorPrototype/extract_csv.py --pdf-dir C:\papers --model gemma3:1b --output .extraction-runs\my-run.csv
+```
+
+By default each run creates `.extraction-runs/<run>/pv_extraction_results.csv` and
+`pv_extraction_results.responses.jsonl`. CSVs use UTF-8 with a BOM for Excel, keep
+the original 27 display labels, and add source, model, status, selected chunk,
+filled-field count, cell evidence, and error columns. A rerun refuses to overwrite existing files.
+Each finished paper is flushed to disk; stopping a run retains already saved rows.
+Raw logs contain the exact prompt/excerpt, response, and error for every attempt,
+linked by source PDF and chunk number. These private artifacts are ignored by Git
+when saved under `.extraction-runs/`.
+
+Performance values are numeric strings in the requested column units. Known matching
+unit suffixes are stripped; unreported units/conversions remain `N/A`. Evidence is
+constrained to literal text windows around efficiency mentions (including the Greek
+eta symbol). Chunks without those mentions leave performance fields as `N/A`.
+Invented quotes and performance numbers absent from
+the excerpt are rejected before candidate selection. These checks establish text
+support, but do not establish that a number represents the correct device or metric.
+
+The script uses 4,000-character chunks with 200-character overlap, temperature 0,
+and an 8,192-token context. `--chunk-size`, `--chunk-overlap`, `--context-size`,
+`--timeout`, `--retries`, `--ollama-url`, and `--model` override these settings.
+If multiple chunks have data, it selects the candidate with the highest unambiguous
+numeric cell efficiency, breaking ties by filled-field count. Without a comparable
+efficiency it selects the most filled candidate. It keeps a single chunk's values
+together instead of combining potentially different devices. Some fields elsewhere
+in the article may therefore remain unavailable.
+
+`Status` distinguishes `extracted`, `partial` (some chunks failed), `no_data`
+(valid responses containing only `N/A`), `partial_no_data`, `no_text` (OCR needed),
+and `failed`. Exit code 0 means every paper has a populated result; 2 means the CSV
+was saved but some papers have partial/missing/failed results; 1 is a setup/output
+error. Structured JSON prevents formatting failures but does not verify scientific
+accuracy. Review extracted values against the selected source excerpt; the small
+`gemma3:1b` model can still miss or invent values. You can select another locally
+installed model using `--model`.
 
 ## Download the paper corpus
 
@@ -54,12 +117,13 @@ The original extractor still uses 6,000-character chunks with a 200-character ov
 selects the response with the most filled fields, validates through its original
 Pydantic model, and writes `pv_extraction_results_ollama.csv`. No custom evidence schema,
 alternative candidate selection, extraction checkpoints, or JSON/SQLite extraction
-exports are used. The dashboard below observes this original process.
+exports are used in the original script. The dashboard can still observe this
+original process when launched with `--extractor original`.
 
 ## Extraction dashboard
 
-The local dashboard restores the paper queue, model progress, parsed values, and original
-CSV results. Its pale blue surfaces, charcoal workspace, rounded panels, and lime accents
+The local dashboard shows the paper corpus, model progress, and saved CSV results.
+Its pale blue surfaces, charcoal workspace, rounded panels, and lime accents
 follow the supplied design reference. The Marimo theme was removed. The original
 `PV-Work/mainScript/extraction.py` is identical to the sponsor's Git version.
 
@@ -79,33 +143,43 @@ ollama pull gemma3:1b
 .\.venv\Scripts\python.exe SponsorPrototype/dashboard/server.py
 ```
 
-Open `http://127.0.0.1:2718/`. No Marimo password is needed. Ollama must be running locally.
-Use **Start extraction** to run all downloaded papers, **Stop** to terminate the worker,
-and **Download CSV** after the original extractor has finished writing its output.
-Collection filters and paper selection let you inspect individual papers; the Results
-view shows the original CSV's 27 columns without adding or renaming fields.
-These controls use native HTML buttons, with visible keyboard focus and selected
-states for the views, collection filters, and papers.
+Open `http://127.0.0.1:2718/`. The Python server serves both the backend API and the
+HTML/CSS/JavaScript frontend. No separate Node server or frontend build is needed.
+Ollama must be running to start a new extraction; importing a saved CSV works without it.
 
-### How the dashboard preserves extraction
+Use **Extract all 60 papers** (the count reflects the current corpus) or select a paper
+and choose **Extract selected paper**. **Stop** terminates the worker. Each completed
+paper's row is published atomically, so **Download CSV** remains available for already
+saved rows during a run or after stopping it. Starting again creates a fresh run.
 
-- `dashboard/server.py` stages hard links (copies if hard links are unavailable) from
-  `pdf/` into `.dashboard-runs/<run>/foldersam/`. This gives the original script its
-  expected relative input folder without modifying its constants or the source PDFs.
-- `dashboard/observer.py` executes the original entry point through `runpy.run_path`.
-  A Python trace observer reads the original function's locals to display the paper,
-  chunk, parsed response, selected result, and handled errors. It does not replace or
-  patch the model, prompt, splitter, parser, selection rules, or CSV writer.
-- Parsed chunk values are labelled as pending until the original extractor selects
-  them. Live accepted values reflect its original results list. Final results and CSV
-  downloads read the original output file; the download returns its exact bytes.
-- The original script silently continues after chunk/PDF errors. The observer exposes
-  those errors and papers with no accepted result, without adding recovery or retries.
-  A response containing only `N/A` remains unaccepted under the original selection rule.
-- If every paper has no accepted result, the original extractor writes no CSV. The
-  dashboard reports **No results** and keeps CSV download unavailable.
-- Start creates a fresh run; Stop does not create a partial CSV or resume checkpoint.
-  A restarted dashboard reports an unfinished run as interrupted.
+To display the saved one-document sample without calling the model again:
+
+```powershell
+.\.venv\Scripts\python.exe SponsorPrototype/dashboard/server.py --import-csv .extraction-runs/sample/pv_extraction_results.csv
+```
+
+Imports verify source filenames against the corpus manifest and preserve the exact
+CSV bytes. The dashboard opens Results when rows exist. Run progress distinguishes
+one processed document from the full 60-paper corpus; the other 59 are marked **Not run**.
+The table shows paper, collection, status, populated-field count, and efficiency. Select
+a result to inspect all 27 article fields, grouped into research, device/materials,
+surfaces/contacts, and performance. Metadata columns are not counted as article fields.
+Partial results retain missing values and display a review note. Source evidence and
+extraction issues are expandable. All model values still require review against the paper.
+
+### Workers and storage
+
+- `dashboard/server.py` stages selected PDFs using hard links or copies into a private
+  `.dashboard-runs/<run>/foldersam/` directory and preserves previous runs.
+- `dashboard/structured_worker.py` runs `extract_csv.py` and publishes paper/chunk
+  progress, saved rows, partial outcomes, and errors through atomic state/CSV updates.
+- `dashboard/results.py` associates each structured row by its source PDF and keeps
+  the 27 article fields separate from CSV metadata.
+- `--extractor original` launches `dashboard/observer.py`, which runs the unmodified
+  sponsor script. Its original prompts, parser, selection rules, and no-CSV behavior
+  for runs without accepted results remain available.
+- Dashboard restarts mark an unfinished run as interrupted. Structured rows already
+  published remain downloadable; a subsequent extraction starts from the beginning.
 
 The dashboard serves only on `127.0.0.1`, accepts job actions only from its own origin,
 and requires no frontend framework or external assets. Its compatible runtime pins are
@@ -119,7 +193,7 @@ unchanged. `.env`, PDF folders, staged PDFs, logs, state, and generated CSV file
 | --- | --- | --- |
 | Read-only Zotero downloader and `.env.example` | Retrieve 20 PDFs per collection into the private corpus | Input acquisition only; no LLM or CSV generation |
 | Dashboard HTML/CSS/JavaScript | Show the queue, actual progress, selected paper values, and final CSV using the supplied design | Presentation only |
-| Local server and trace observer | Launch the original script and report its progress | Original LLM → parsing → CSV runs unchanged |
+| Local server, structured worker, and trace observer | Launch extraction, import saved CSVs, and report progress | Structured extraction is the default; the unmodified original worker remains selectable |
 | Removed Marimo stylesheet/configuration | Restore the requested dashboard and original notebook | Original extractor restored exactly |
 | Ignore rules | Keep credentials, source papers, and run artifacts off GitHub | No change to extraction behavior |
 | Dashboard tests and runtime pins | Verify source preservation, accurate progress, exact CSV downloads, and local request boundaries | Tests compare observed/unobserved original CSV bytes using deterministic transport fixtures |
@@ -130,13 +204,21 @@ unchanged. `.env`, PDF folders, staged PDFs, logs, state, and generated CSV file
 .\.venv\Scripts\python.exe -m unittest discover -s SponsorPrototype/tests -v
 ```
 
-The suite contains nine tests. Retrieval tests cover Zotero pagination, PDF download
+Retrieval tests cover Zotero pagination, PDF download
 validation, and credential handling on storage redirects. Dashboard tests verify the
 original entry point and source hash, one progress increment per model call, correct
 paper-to-row association, exact CSV download bytes and quoted values, corpus path
 boundaries, and rejection of cross-origin job actions. A deterministic transport fixture
 compares the original script's CSV bytes with and without the observer while retaining
 its prompts, splitter, chain, parser, selection, and CSV writer.
+Dashboard tests also cover importing a BOM CSV, preserving its partial status and exact
+download bytes, matching rows to source papers, restoring imported runs, downloading
+saved rows after stop, and structured worker progress/CSV publication.
+The separate CSV extractor tests reject null/schema echoes, malformed JSON, and
+invented performance numbers/quotes,
+exercise the real HTTP transport against a local fixture server, verify retries and
+raw-response provenance, preserve quoted CSV values, check missing/failed/no-text
+rows and partial results, and compare the field labels to the original schema.
 
 Passing these tests verifies retrieval and dashboard behavior; it does not establish the
 quality of live Gemma extraction. A live parsed response may contain only `N/A`, and an

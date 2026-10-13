@@ -1,4 +1,5 @@
 import contextlib
+import csv
 import hashlib
 import io
 import json
@@ -14,7 +15,8 @@ from urllib.request import Request, urlopen
 from http.server import ThreadingHTTPServer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from dashboard import observer, server
+from dashboard import observer, server, structured_worker
+import extract_csv
 
 
 class ObserverTests(unittest.TestCase):
@@ -140,6 +142,80 @@ class DashboardTests(unittest.TestCase):
         (self.directory / 'private.pdf').write_bytes(b'%PDF-outside-the-corpus')
         (self.jobs.pdf_dir / 'manifest.json').write_text(json.dumps({'papers': [{'pdf_path': '../private.pdf', 'paper_id': 'outside'}]}))
         self.assertEqual(self.jobs.corpus(), [])
+
+    def test_import_bom_csv_matches_source_paper_and_retains_partial_status(self):
+        papers = []
+        for name in ('processed', 'unprocessed'):
+            (self.directory / f'{name}.pdf').write_bytes(b'%PDF-fixture')
+            papers.append(dict(paper_id=name, title=name, pdf_path=f'{name}.pdf',
+                               authors=[], collections=['Si-PERC']))
+        (self.directory / 'manifest.json').write_text(json.dumps({'papers': papers}))
+        source = self.directory / 'sample.csv'
+        row = dict.fromkeys(extract_csv.COLUMN_MAP.values(), 'N/A')
+        row.update({'Source PDF': 'processed.pdf', 'Status': 'partial',
+                    'Title': 'Processed paper', 'Model': 'gemma3:1b',
+                    'Chunks Processed': '15', 'Selected Chunk': '3',
+                    'Filled Fields': '1', 'Device Type': 'PERC', 'Error': 'A chunk failed.'})
+        with source.open('w', encoding='utf-8-sig', newline='') as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(row))
+            writer.writeheader()
+            writer.writerow(row)
+        snapshot = self.jobs.import_csv(source)
+        self.assertEqual(snapshot['status'], 'completed_with_issues')
+        self.assertEqual(snapshot['run_total'], 1)
+        self.assertEqual(snapshot['processed'], 1)
+        self.assertEqual(snapshot['corpus_count'], 2)
+        self.assertEqual(len(snapshot['field_columns']), 27)
+        self.assertTrue(snapshot['csv_available'])
+        by_id = {paper['paper_id']: paper for paper in snapshot['papers']}
+        self.assertEqual(by_id['processed']['row_index'], 0)
+        self.assertEqual(by_id['processed']['status'], 'partial')
+        self.assertEqual(by_id['processed']['selected_chunk'], 3)
+        self.assertEqual(by_id['unprocessed']['status'], 'not_run')
+        self.assertNotIn('row_index', by_id['unprocessed'])
+        self.assertNotIn('\ufeffSource PDF', snapshot['columns'])
+        with urlopen(self.url + '/api/csv') as response:
+            self.assertEqual(response.read(), source.read_bytes())
+            self.assertIn(server.STRUCTURED_CSV_NAME, response.headers['Content-Disposition'])
+        restored = server.Jobs().snapshot()
+        self.assertEqual(restored['rows'], snapshot['rows'])
+
+    def test_structured_saved_rows_remain_downloadable_after_stop(self):
+        self.jobs.directory = self.directory / 'runs' / 'stopped'
+        self.jobs.directory.mkdir()
+        observer.save(self.jobs.directory / 'state.json', dict(status='stopped', extractor='structured',
+                      csv_name=server.STRUCTURED_CSV_NAME, papers=[], processed=1, accepted=0, columns=[]))
+        data = b'Source PDF,Status\r\nfixture.pdf,no_data\r\n'
+        (self.jobs.directory / server.STRUCTURED_CSV_NAME).write_bytes(data)
+        with urlopen(self.url + '/api/csv') as response:
+            self.assertEqual(response.read(), data)
+
+    def test_structured_worker_publishes_real_csv_and_progress(self):
+        directory = self.directory / 'worker'
+        (directory / 'foldersam').mkdir(parents=True)
+        (directory / 'foldersam' / 'fixture.pdf').write_bytes(b'%PDF-transport-fixture')
+        paper = dict(paper_id='fixture', pdf_path='fixture.pdf', title='Fixture',
+                     status='queued', chunk=0, chunks=0)
+        observer.save(directory / 'state.json', dict(status='starting', papers=[paper], model='fixture',
+                      processed=0, accepted=0))
+        content = dict.fromkeys(extract_csv.RESPONSE_FIELDS, 'N/A')
+        content.update(device_type='TOPCon', efficiency_percent='25.1',
+                       cell_evidence='Our cell efficiency was 25.1%.')
+        reply = dict(done=True, done_reason='stop', message={'content': json.dumps(content)})
+        with patch.object(extract_csv, 'extract_text', return_value=content['cell_evidence']), \
+                patch.object(extract_csv, 'ollama_chat', return_value=reply), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(structured_worker.work(directory), 0)
+        state = json.loads((directory / 'state.json').read_text())
+        self.assertEqual(state['status'], 'completed')
+        self.assertEqual(state['processed'], 1)
+        self.assertEqual(state['accepted'], 1)
+        self.assertEqual(state['papers'][0]['status'], 'extracted')
+        self.assertEqual(state['papers'][0]['row_index'], 0)
+        self.assertEqual(state['papers'][0]['values']['Efficiency (%)'], '25.1')
+        self.assertEqual((directory / server.STRUCTURED_CSV_NAME).read_bytes(),
+                         (directory / 'worker.csv').read_bytes())
+        self.assertTrue((directory / 'worker.responses.jsonl').exists())
 
 
 if __name__ == '__main__':
