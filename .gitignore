@@ -1,1 +1,16 @@
 /darts_pvcells_ai_survey/
+
+# Local credentials and downloaded sponsor papers
+.env
+.env.*
+!.env.example
+**/pdf/
+**/pdfs/
+**/*.pdf
+
+# Local environments and generated caches
+.venv/
+__pycache__/
+*.py[cod]
+__marimo__/
+.dashboard-runs/

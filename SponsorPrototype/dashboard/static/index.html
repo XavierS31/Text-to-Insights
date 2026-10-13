@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Text to Insights · Extraction</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+<main class="app-shell">
+  <header class="topbar">
+    <div class="brand"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 3v26M3 16h26M7 7l18 18M7 25L25 7"/></svg><span>Text to Insights</span></div>
+    <div class="view-tabs" aria-label="Dashboard view"><button id="extraction-view" aria-pressed="true">Extraction</button><button id="results-view" aria-pressed="false">Results <span id="result-count">0</span></button></div>
+    <span class="model-badge">Ollama <strong>gemma3:1b</strong></span>
+  </header>
+  <div class="title-row"><div><h1>Paper extraction</h1><p>PV-Opto-KG <span class="separator">/</span> Silicon photovoltaics</p></div><div class="actions"><button id="start" class="primary">Start extraction <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></button><button id="stop" disabled>Stop</button></div></div>
+  <div id="connection" class="notice" role="status" hidden></div>
+  <div id="action-error" class="notice error" role="alert" hidden></div>
+  <section class="overview" aria-label="Corpus and progress">
+    <div class="collection-overview" id="collection-overview"></div>
+    <div class="run-overview"><div class="run-top"><span>Extraction progress</span><span id="run-status" class="status-pill">Ready</span></div><div class="progress-value"><strong id="processed">0</strong><span id="total">/ 60 papers</span></div><progress id="progress" max="60" value="0" aria-label="Papers processed"></progress><div class="run-bottom"><span id="accepted">0 CSV rows</span><span id="elapsed">Not started</span></div></div>
+  </section>
+  <section id="extraction-panel" aria-label="Extraction workspace">
+    <div class="filter-row"><span>Collections</span><div id="filters" class="filters" aria-label="Filter papers by collection"></div><span id="paper-count" class="filter-count"></span></div>
+    <div class="workspace">
+      <aside class="paper-pane"><div class="pane-heading"><h2>Papers</h2><span id="queue-label">Downloaded corpus</span></div><div id="paper-list" class="paper-list" aria-label="Papers"></div></aside>
+      <section class="detail-pane" aria-label="Selected paper"><div class="detail-top"><span id="selected-collection"></span><span id="paper-status" class="status-pill"></span></div><h2 id="paper-title">Loading the downloaded corpus…</h2><p id="paper-author" class="author"></p><a id="paper-doi" target="_blank" rel="noreferrer" hidden></a><div class="paper-facts"><div><span>Current step</span><strong id="paper-step">Queued</strong></div><div><span>Model chunks</span><strong id="paper-chunks">—</strong></div><div><span>Fields populated</span><strong id="paper-fields">—</strong></div></div><div class="output-heading"><h3 id="output-title">Extracted values</h3><span id="output-note"></span></div><p id="empty-output" class="empty-output">Select a paper to inspect its extraction.</p><div id="values" class="values"></div><p id="paper-error" class="paper-error" hidden></p></section>
+    </div>
+    <details class="run-log"><summary>Original extractor log</summary><pre id="log">No extraction has started.</pre></details>
+  </section>
+  <section id="results-panel" class="results-panel" aria-label="Original CSV results" hidden><div class="results-heading"><div><h2>CSV results</h2><p id="results-note">Results appear when the original extractor saves its CSV.</p></div><button id="download" disabled>Download CSV <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M5 17v4h14v-4"/></svg></button></div><div id="results-empty" class="results-empty">Run extraction to generate <code>pv_extraction_results_ollama.csv</code>.</div><div class="table-scroll"><table id="results-table" hidden><caption>Original sponsor CSV output</caption><thead id="table-head"></thead><tbody id="table-body"></tbody></table></div></section>
+  <footer><span id="run-message">Connecting to the local dashboard…</span><span>Local model · Original sponsor extractor</span></footer>
+</main>
+</body>
+</html>

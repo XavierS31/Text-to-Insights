@@ -32,6 +32,20 @@ Text-to-Insights extends existing sponsor-developed LLM extraction prototypes in
 9. Evaluating extraction and query quality against expert-verified data
 10. Supporting both hosted frontier models and locally hosted open-weight models
 
+The [Zotero downloader](SponsorPrototype/README.md) retrieves 20 papers each from
+Si-PERC, Si-SHJ, and Si-TOPCon using read-only requests. The sponsor's original
+LLM-to-parser-to-CSV extraction code is unchanged.
+
+The [local extraction dashboard](SponsorPrototype/README.md#extraction-dashboard) shows
+the downloaded paper queue, live Gemma progress, pending parsed responses, accepted
+values, and the original 27-column CSV. Its native start, stop, results, download,
+collection-filter, and paper-selection controls follow the supplied dashboard design
+reference. The Marimo theme was removed, and the trace observer runs the original
+extractor without changing extraction or CSV output. Follow the linked setup steps,
+run `.\.venv\Scripts\python.exe SponsorPrototype/dashboard/server.py`, and open
+`http://127.0.0.1:2718/`. CSV downloads return the original file's exact bytes; all-`N/A`
+responses and runs with no accepted results retain the sponsor's original behavior.
+
 ## Proposed End-to-End Workflow
 
 ```text
