@@ -1,0 +1,23 @@
+name: pv-extraction-env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - git
+  - pip:
+      - marimo==0.14.9
+      - pandas
+      - pydantic
+      - tqdm
+      - pdfminer.six
+      - langchain
+      - langchain-community
+      - datasets
+      - peft
+      - transformers
+      - sentencepiece
+      - accelerate
+      - jupyter
+      - matplotlib

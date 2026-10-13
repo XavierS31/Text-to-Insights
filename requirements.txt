@@ -1,0 +1,14 @@
+marimo==0.14.9
+pandas
+pydantic
+tqdm
+pdfminer.six
+langchain
+langchain-community
+datasets
+peft
+transformers
+sentencepiece
+accelerate
+jupyter
+matplotlib
