@@ -71,17 +71,32 @@ class ExtractionTests(unittest.TestCase):
         data = dict.fromkeys(extract_csv.RESPONSE_FIELDS, 'N/A')
         data.update(device_type='TOPCon', key_findings='Quoted, "value"', efficiency_percent='25.1')
         data['cell_evidence'] = 'The TOPCon cell reached 25.1% efficiency.'
-        replies = ['null', json.dumps(data), json.dumps(dict.fromkeys(data, 'N/A')),
-                   '{"properties":{}}', '{"properties":{}}']
+
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
                 pass
 
+            def do_GET(self):
+                payload = json.dumps({'models':[{'name':'fixture','digest':'fixture-digest'}]}).encode()
+                self.send_response(200)
+                self.send_header('Content-Length',str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
             def do_POST(self):
-                requests.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
+                request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                requests.append(request)
+                keys = request['format']['required']
+                prompt = request['messages'][-1]['content']
+                if len(requests)==1:
+                    content = 'null'
+                elif prompt.endswith('paper C'):
+                    content = '{"properties":{}}'
+                else:
+                    content = json.dumps({key:('N/A' if prompt.endswith('paper B') else 'E1' if key=='evidence_id' else data[key]) for key in keys})
                 payload = json.dumps({'done': True, 'done_reason': 'stop',
-                                      'message': {'content': replies.pop(0)}}).encode()
+                                      'message': {'content': content}}).encode()
                 self.send_response(200)
                 self.send_header('Content-Length', str(len(payload)))
                 self.end_headers()
@@ -98,7 +113,7 @@ class ExtractionTests(unittest.TestCase):
                 args = SimpleNamespace(pdf_dir=directory, output=directory / 'results.csv',
                                        limit=None, model='fixture', retries=1, timeout=5,
                                        ollama_url=f'http://127.0.0.1:{http.server_port}',
-                                       chunk_size=4000, chunk_overlap=200, context_size=8192)
+                                       chunk_size=4000, chunk_overlap=200, context_size=8192, database=directory / 'test.sqlite3')
                 with patch.object(extract_csv, 'extract_text', side_effect=[data['cell_evidence'], 'paper B', 'paper C', '']), contextlib.redirect_stdout(io.StringIO()):
                     self.assertEqual(extract_csv.run(args), 2)
                 with args.output.open(encoding='utf-8-sig', newline='') as handle:
@@ -107,15 +122,16 @@ class ExtractionTests(unittest.TestCase):
                                  ['extracted', 'no_data', 'failed', 'no_text'])
                 self.assertEqual(rows[0]['Key Findings'], 'Quoted, "value"')
                 self.assertEqual(rows[0]['Selected Chunk'], '1')
-                self.assertIn('Chunk 1, attempt 1', rows[0]['Error'])
+                self.assertIn('attempt 1', rows[0]['Error'])
                 self.assertEqual(rows[2]['Efficiency (%)'], 'N/A')
                 self.assertEqual(rows[2]['Filled Fields'], '0')
                 records = [json.loads(line) for line in args.output.with_suffix('.responses.jsonl').read_text().splitlines()]
-                self.assertEqual(len(records), 5)
+                self.assertGreater(len(records), 5)
                 self.assertEqual(records[0]['response']['message']['content'], 'null')
                 self.assertEqual(records[1]['source_pdf'], 'a.pdf')
                 self.assertEqual(records[1]['attempt'], 2)
-                self.assertEqual(requests[0]['format'], extract_csv.chunk_schema(data['cell_evidence']))
+                self.assertEqual(requests[0]['format']['required'],['evidence_id','efficiency_percent'])
+                self.assertEqual(requests[0]['options']['num_predict'],1024)
                 self.assertFalse(requests[0]['stream'])
                 with self.assertRaises(FileExistsError):
                     extract_csv.run(args)

@@ -145,7 +145,10 @@ def run(directory):
 
 
 if __name__ == '__main__':
+    sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+    from extraction_store import DEFAULT_DB, WorkerLock
     parser = argparse.ArgumentParser()
     parser.add_argument('--run-dir', type=Path, required=True)
     args = parser.parse_args()
-    sys.exit(run(args.run_dir.resolve()))
+    with WorkerLock(DEFAULT_DB):
+        sys.exit(run(args.run_dir.resolve()))

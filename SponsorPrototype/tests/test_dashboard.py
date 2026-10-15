@@ -105,7 +105,7 @@ class DashboardTests(unittest.TestCase):
         self.settings_patch = patch.object(server.Settings, 'load', return_value=SimpleNamespace(pdf_dir=self.directory))
         self.runs_patch.start()
         self.settings_patch.start()
-        self.jobs = server.Jobs()
+        self.jobs = server.Jobs(database=self.directory / "test.sqlite3")
         self.http = ThreadingHTTPServer(('127.0.0.1', 0), server.handler(self.jobs))
         self.thread = threading.Thread(target=self.http.serve_forever, daemon=True)
         self.thread.start()
@@ -143,6 +143,50 @@ class DashboardTests(unittest.TestCase):
         (self.jobs.pdf_dir / 'manifest.json').write_text(json.dumps({'papers': [{'pdf_path': '../private.pdf', 'paper_id': 'outside'}]}))
         self.assertEqual(self.jobs.corpus(), [])
 
+    def test_sqlite_history_individual_download_and_missing_export_survive_restart(self):
+        (self.directory / 'paper.pdf').write_bytes(b'%PDF-fixture')
+        (self.directory / 'manifest.json').write_text(json.dumps({'papers':[
+            dict(paper_id='paper',title='Paper',pdf_path='paper.pdf',authors=[],collections=['Si-PERC'])]}))
+        row = dict.fromkeys(extract_csv.COLUMN_MAP.values(),'N/A')
+        row.update({'Source PDF':'paper.pdf','Status':'partial','Title':'Paper','Model':'gemma3:1b',
+                    'Filled Fields':'1','Device Type':'PERC','Chunks Processed':'3'})
+        source = self.directory / 'saved.csv'
+        from extraction_store import csv_bytes
+        source.write_bytes(csv_bytes([row]))
+        snapshot = self.jobs.import_csv(source)
+        run_id = snapshot['run_id']
+        with urlopen(self.url+'/api/runs') as response:
+            history = json.load(response)['runs']
+        self.assertEqual(history[0]['run_id'],run_id)
+        with urlopen(self.url+f'/api/csv?run_id={run_id}&paper_id=paper') as response:
+            decoded = list(csv.DictReader(io.StringIO(response.read().decode('utf-8-sig'))))
+        self.assertEqual(decoded[0]['Device Type'],'PERC')
+        with self.assertRaises(HTTPError) as caught:
+            urlopen(self.url+f'/api/csv?run_id={run_id}&paper_id=missing')
+        self.assertEqual(caught.exception.code,404)
+        export = self.jobs.csv_path(snapshot)
+        expected = export.read_bytes()
+        export.unlink()
+        restored = server.Jobs(database=self.directory/'test.sqlite3')
+        self.assertEqual(restored.snapshot(run_id)['rows'],snapshot['rows'])
+        self.assertEqual(export.read_bytes(),expected)
+        self.assertFalse(restored.snapshot(run_id)['can_resume'])
+        self.assertFalse(restored.snapshot(run_id)['can_retry'])
+        with self.assertRaisesRegex(ValueError,'Imported CSV'):
+            restored.resume(run_id)
+
+    def test_resume_action_rejects_missing_run_and_cross_origin(self):
+        request = Request(self.url+'/api/resume',data=b'{}',
+                          headers={'Origin':self.url,'Content-Type':'application/json'})
+        with self.assertRaises(HTTPError) as caught:
+            urlopen(request)
+        self.assertEqual(caught.exception.code,409)
+        request = Request(self.url+'/api/retry-failed',data=b'{"run_id":"x"}',
+                          headers={'Origin':'https://other.example','Content-Type':'application/json'})
+        with self.assertRaises(HTTPError) as caught:
+            urlopen(request)
+        self.assertEqual(caught.exception.code,403)
+
     def test_import_bom_csv_matches_source_paper_and_retains_partial_status(self):
         papers = []
         for name in ('processed', 'unprocessed'):
@@ -177,7 +221,7 @@ class DashboardTests(unittest.TestCase):
         with urlopen(self.url + '/api/csv') as response:
             self.assertEqual(response.read(), source.read_bytes())
             self.assertIn(server.STRUCTURED_CSV_NAME, response.headers['Content-Disposition'])
-        restored = server.Jobs().snapshot()
+        restored = server.Jobs(database=self.directory / "test.sqlite3").snapshot()
         self.assertEqual(restored['rows'], snapshot['rows'])
 
     def test_structured_saved_rows_remain_downloadable_after_stop(self):
@@ -196,26 +240,38 @@ class DashboardTests(unittest.TestCase):
         (directory / 'foldersam' / 'fixture.pdf').write_bytes(b'%PDF-transport-fixture')
         paper = dict(paper_id='fixture', pdf_path='fixture.pdf', title='Fixture',
                      status='queued', chunk=0, chunks=0)
-        observer.save(directory / 'state.json', dict(status='starting', papers=[paper], model='fixture',
-                      processed=0, accepted=0))
+        from extraction_runtime import DEFAULTS, create_run
+        from extraction_store import Store
+        from types import SimpleNamespace
+        store = Store(self.directory / 'worker.sqlite3')
+        args = SimpleNamespace(**DEFAULTS,output=directory / server.STRUCTURED_CSV_NAME)
+        paper.update(path=directory / 'foldersam' / 'fixture.pdf')
+        state = create_run(store,[paper],args,'fixture-digest',run_id='worker-test',directory=directory)
+        state['database'] = str(store.path)
+        store.save_state(state)
+        observer.save(directory / 'state.json',state)
         content = dict.fromkeys(extract_csv.RESPONSE_FIELDS, 'N/A')
         content.update(device_type='TOPCon', efficiency_percent='25.1',
                        cell_evidence='Our cell efficiency was 25.1%.')
-        reply = dict(done=True, done_reason='stop', message={'content': json.dumps(content)})
-        with patch.object(extract_csv, 'extract_text', return_value=content['cell_evidence']), \
-                patch.object(extract_csv, 'ollama_chat', return_value=reply), \
+        def reply(url,payload,timeout):
+            keys = payload['format']['required']
+            values = {key: ('E1' if key=='evidence_id' else content[key]) for key in keys}
+            return dict(done=True,done_reason='stop',message={'content':json.dumps(values)})
+        with patch('extraction_runtime.model_digest',return_value='fixture-digest'), \
+                patch.object(extract_csv,'extract_text',return_value=content['cell_evidence']), \
+                patch('focused_extraction.ollama_chat',side_effect=reply), \
                 contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(structured_worker.work(directory), 0)
-        state = json.loads((directory / 'state.json').read_text())
-        self.assertEqual(state['status'], 'completed')
-        self.assertEqual(state['processed'], 1)
-        self.assertEqual(state['accepted'], 1)
-        self.assertEqual(state['papers'][0]['status'], 'extracted')
-        self.assertEqual(state['papers'][0]['row_index'], 0)
-        self.assertEqual(state['papers'][0]['values']['Efficiency (%)'], '25.1')
-        self.assertEqual((directory / server.STRUCTURED_CSV_NAME).read_bytes(),
-                         (directory / 'worker.csv').read_bytes())
-        self.assertTrue((directory / 'worker.responses.jsonl').exists())
+            self.assertEqual(structured_worker.work(directory),0)
+        state = store.load('worker-test')['state']
+        self.assertEqual(state['status'],'completed')
+        self.assertEqual(state['processed'],1)
+        self.assertEqual(state['accepted'],1)
+        rows = store.rows('worker-test')
+        self.assertEqual(rows[0]['Device Type'],'TOPCon')
+        self.assertEqual(rows[0]['Efficiency (%)'],'25.1')
+        self.assertEqual((directory / server.STRUCTURED_CSV_NAME).read_bytes(),store.artifact('worker-test'))
+        self.assertEqual(len(list((directory / 'papers').glob('*.csv'))),1)
+        self.assertTrue((directory / 'pv_extraction_results.responses.jsonl').exists())
 
 
 if __name__ == '__main__':

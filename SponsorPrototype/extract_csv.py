@@ -105,10 +105,13 @@ def discover_papers(pdf_dir):
         paper.update(path=path, pdf_path=path.relative_to(pdf_dir).as_posix())
         paper.setdefault('title', path.stem)
         papers.append(paper)
+    if metadata:
+        order = {path:index for index,path in enumerate(metadata)}
+        papers.sort(key=lambda paper: order.get(paper['path'].resolve(),len(order)))
     return papers
 
 
-def split_text(text, size=4000, overlap=200):
+def split_text(text, size=2500, overlap=200):
     """Bound prompts while preferring paragraph/line boundaries."""
     if size < 500 or not 0 <= overlap < size:
         raise ValueError('Chunk size must be >= 500 and overlap must be smaller than size.')
@@ -229,53 +232,8 @@ def ollama_chat(base_url, payload, timeout):
 
 
 def extract_chunk(chunk, number, paper, args, raw_log):
-    correction = ''
-    errors = []
-    schema = chunk_schema(chunk)
-    evidence_choices = schema['properties']['cell_evidence']['enum']
-    for attempt in range(1, args.retries + 2):
-        prompt = ('Choose cell_evidence from these exact source windows, or N/A if none '
-                  'reports the authors\' measured cell performance:\n'
-                  + json.dumps(evidence_choices, ensure_ascii=False) + '\n'
-                  'Fill these fields: ' + ', '.join(RESPONSE_FIELDS) + '\n'
-                  'Output shape example (other requested fields must also be included): '
-                  '{"device_type":"N/A","efficiency_percent":"N/A"}.\n'
-                  + correction + '\nARTICLE EXCERPT:\n' + chunk)
-        payload = {
-            'model': args.model, 'stream': False, 'format': schema,
-            'messages': [{'role': 'system', 'content': SYSTEM_PROMPT},
-                         {'role': 'user', 'content': prompt}],
-            'options': {'temperature': 0, 'num_ctx': args.context_size, 'num_predict': 3072},
-        }
-        record = dict(source_pdf=paper['pdf_path'], chunk=number, attempt=attempt,
-                      model=args.model, request=payload)
-        try:
-            response = ollama_chat(args.ollama_url, payload, args.timeout)
-            record['response'] = response
-            if response.get('error'):
-                raise ValueError(str(response['error']))
-            if response.get('done') is not True or response.get('done_reason') == 'length':
-                raise ValueError('Ollama response was unfinished or reached its token limit.')
-            data = validate_content(response.get('message', {}).get('content'))
-            validate_grounding(data, chunk)
-            record['valid'] = True
-            return data, errors
-        except HTTPError as error:
-            detail = error.read().decode('utf-8', errors='replace')
-            message = f'HTTP {error.code}: {detail}'
-            record['error'] = message
-            errors.append(f'Chunk {number}, attempt {attempt}: {message}')
-        except (ValueError, OSError, URLError, AttributeError) as error:
-            message = f'{type(error).__name__}: {error}'
-            record['error'] = message
-            errors.append(f'Chunk {number}, attempt {attempt}: {message}')
-        finally:
-            raw_log.write(json.dumps(record, ensure_ascii=False) + '\n')
-            raw_log.flush()
-        correction = ('Previous attempt failed: ' + record['error'] + '\n'
-                      'Return all requested keys as strings. Replace unsupported values with N/A.\n')
-        print(f'    {errors[-1]}', flush=True)
-    return None, errors
+    from focused_extraction import extract
+    return extract(chunk, number, paper, args, raw_log)
 
 
 def extract_paper(paper, args, raw_log, on_event=None):
@@ -322,40 +280,17 @@ def extract_paper(paper, args, raw_log, on_event=None):
         elif valid_chunks:
             row['Status'] = 'partial_no_data' if failed_chunks else 'no_data'
     except Exception as error:
+        from focused_extraction import OllamaUnavailable
+        if isinstance(error, OllamaUnavailable):
+            raise
         errors.append(f'{type(error).__name__}: {error}')
     row['Error'] = '\n'.join(errors)
     return row
 
 
 def run(args, papers=None, on_event=None):
-    papers = discover_papers(args.pdf_dir) if papers is None else papers
-    if args.limit:
-        papers = papers[:args.limit]
-    if not papers:
-        raise ValueError(f'No PDF files found in {args.pdf_dir}.')
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    raw_path = args.output.with_suffix('.responses.jsonl')
-    if args.output.exists() or raw_path.exists():
-        raise FileExistsError('CSV or raw log already exists; choose a new --output path.')
-    counts = {}
-    # Exclusive creation prevents an accidental rerun from overwriting research results.
-    with args.output.open('x', encoding='utf-8-sig', newline='') as output:
-        with raw_path.open('x', encoding='utf-8') as raw_log:
-            writer = csv.DictWriter(output, fieldnames=META_COLUMNS + list(COLUMN_MAP.values()))
-            writer.writeheader()
-            output.flush()
-            for index, paper in enumerate(papers, 1):
-                print(f'[{index}/{len(papers)}] {paper["title"]}', flush=True)
-                row = extract_paper(paper, args, raw_log, on_event=on_event)
-                writer.writerow(row)
-                output.flush()
-                counts[row['Status']] = counts.get(row['Status'], 0) + 1
-                if on_event:
-                    on_event('saved', paper, {'row': row, 'row_index': index - 1})
-                print(f'  Saved: {row["Status"]}, {row["Filled Fields"]}/27 filled fields', flush=True)
-    print(f'CSV: {args.output}\nRaw responses: {raw_path}\nStatuses: {counts}', flush=True)
-    # A CSV containing only failure/missing-data rows is still useful but is not success.
-    return 0 if counts.get('extracted', 0) == len(papers) else 2
+    from extraction_runtime import run as durable_run
+    return durable_run(args, papers=papers, on_event=on_event)
 
 
 def main():
@@ -372,14 +307,37 @@ def main():
     parser.add_argument('--limit', type=int, help='Process only the first N PDFs.')
     parser.add_argument('--retries', type=int, default=1, help='Retries after an invalid/failed call.')
     parser.add_argument('--timeout', type=float, default=180)
-    parser.add_argument('--chunk-size', type=int, default=4000)
+    parser.add_argument('--chunk-size', type=int, default=2500)
     parser.add_argument('--chunk-overlap', type=int, default=200)
     parser.add_argument('--context-size', type=int, default=8192)
+    from extraction_store import DEFAULT_DB, Store
+    parser.add_argument('--num-predict', type=int, default=1024)
+    parser.add_argument('--database', type=Path, default=DEFAULT_DB)
+    parser.add_argument('--resume', metavar='RUN_ID')
+    parser.add_argument('--retry-failed', action='store_true', help='Retry failed tasks in --resume run.')
     args = parser.parse_args()
+    if args.model != 'gemma3:1b':
+        parser.error('This prototype keeps the local gemma3:1b model.')
+    if args.retry_failed and not args.resume:
+        parser.error('--retry-failed requires --resume RUN_ID.')
+    if args.resume:
+        from extraction_runtime import DEFAULTS
+        saved = Store(args.database).load(args.resume)
+        # Reject explicitly changed settings rather than silently ignoring them.
+        for key in DEFAULTS:
+            flag = '--' + key.replace('_','-')
+            if any(token == flag or token.startswith(flag+'=') for token in sys.argv[1:]):
+                if getattr(args,key) != saved['config'].get(key):
+                    parser.error('Settings changed; start a new run.')
+            if key in saved['config']:
+                setattr(args,key,saved['config'][key])
+        args.run_id = args.resume
+        args.output = Path(saved['state']['output_path'])
+
     if args.limit is not None and args.limit < 1:
         parser.error('--limit must be positive.')
-    if args.retries < 0 or args.timeout <= 0 or args.context_size < 4096:
-        parser.error('Use nonnegative retries, a positive timeout, and context size >= 4096.')
+    if not 0 <= args.retries <= 1 or args.timeout <= 0 or args.context_size < 4096 or not 128 <= args.num_predict <= 2048:
+        parser.error('Use retries 0–1, positive timeout, context >= 4096, and num-predict 128–2048.')
     if args.chunk_size < 500 or not 0 <= args.chunk_overlap < args.chunk_size:
         parser.error('Chunk size must be >= 500 and 0 <= overlap < chunk size.')
     args.pdf_dir = (args.pdf_dir or Settings.load().pdf_dir).resolve()

@@ -1,5 +1,8 @@
 const $ = id => document.getElementById(id);
 let state = null;
+let selectedRun = null;
+let historySignature = "";
+let savedRuns = [];
 let selected = null;
 let filter = 'All papers';
 let followCurrent = true;
@@ -16,11 +19,19 @@ function duration(seconds) {if(seconds<60)return `${seconds}s`; const minutes=Ma
 function render() {
   if(!state)return;
   const active=['starting','running'].includes(state.status);
+  const anyActive=Boolean(state.active_run_id)||active;
+  $('resume').hidden=!state.can_resume; $('resume').disabled=busy||anyActive;
+  $('retry-failed').hidden=!state.can_retry; $('retry-failed').disabled=busy||anyActive;
+  const runSignature=JSON.stringify([selectedRun,savedRuns]);
+  if(historySignature!==runSignature){
+    $('saved-run').replaceChildren(...savedRuns.map(run=>{const option=node('option',`${run.imported?'Imported CSV':run.run_id} · ${run.processed||0}/${run.run_total||0} · ${labels[run.status]||run.status}`);option.value=run.run_id;return option;}));
+    $('saved-run').value=state.run_id||''; $('saved-run').disabled=!savedRuns.length;historySignature=runSignature;
+  }
   const fields=state.field_columns||state.columns;
-  $('start').disabled=active||busy||!state.corpus_count;
+  $('start').disabled=anyActive||busy||!state.corpus_count;
   $('start').textContent=active?'Extracting…':`Extract all ${state.corpus_count} papers`;
   $('model-name').textContent=state.model;
-  $('stop').disabled=!active||busy;
+  $('stop').disabled=!anyActive||busy;
   $('download').disabled=!state.csv_available;
   badge('run-status',state.status);
   $('processed').textContent=state.processed;
@@ -59,7 +70,7 @@ function render() {
   $('paper-count').textContent=`${papers.length} papers`;
   const paper=state.papers.find(p=>p.paper_id===selected);
   if(paper) {
-    $('start-selected').disabled=active||busy||!state.corpus_count;
+    $('start-selected').disabled=anyActive||busy||!state.corpus_count;
     $('selected-collection').textContent=paper.collections.join(' · ');
     $('paper-title').textContent=paper.title;
     $('paper-author').textContent=(paper.authors||[]).slice(0,4).join(', ')+((paper.authors||[]).length>4?' et al.':'');
@@ -69,6 +80,8 @@ function render() {
     if(paper.doi)$('paper-doi').href=`https://doi.org/${encodeURI(paper.doi)}`;
     badge('paper-status',paper.status);
     $('paper-step').textContent=labels[paper.status]||paper.status;
+    $('paper-group').textContent=paper.status==='model'?(paper.group||'Preparing'):'—';
+    $('download-paper').disabled=busy||!Number.isInteger(paper.row_index);
     $('paper-chunks').textContent=paper.chunks?`${paper.chunk} / ${paper.chunks}`:'—';
     const finalRow=Number.isInteger(paper.row_index)?state.rows[paper.row_index]:null;
     const values=finalRow||paper.values||paper.candidate;
@@ -88,7 +101,7 @@ function render() {
     $('paper-evidence').hidden=!paper.evidence||paper.evidence==='N/A';
     $('evidence-text').textContent=paper.evidence||'';
   } else {
-    $('start-selected').disabled=true;
+    $('start-selected').disabled=true; $('download-paper').disabled=true;
     $('paper-title').textContent='No downloaded papers';
     $('empty-output').textContent='Download the Zotero corpus before starting extraction.';
   }
@@ -99,7 +112,7 @@ function render() {
   const notRun=state.papers.filter(p=>p.status==='not_run').length;
   $('results-review').textContent=`${notRun?`${notRun} downloaded papers were not processed in this run. `:''}These values are model output awaiting source review; partial results and missing measurements are retained in the CSV.`;
   const tableScroll=document.querySelector('.table-scroll');const left=tableScroll.scrollLeft;const top=tableScroll.scrollTop;
-  const newTableSignature=JSON.stringify([selected,state.rows]);
+  const newTableSignature=JSON.stringify([state.run_id,selected,state.rows]);
   if(newTableSignature!==tableSignature){
     const head=node('tr');head.append(...['Paper','Collection','Extraction','Fields','Efficiency (%)'].map(c=>{const th=node('th',c);th.scope='col';return th;}));$('table-head').replaceChildren(head);
     $('table-body').replaceChildren(...state.rows.map((row,index)=>{const tr=node('tr');const source=state.papers.find(p=>p.row_index===index);const title=node('td');const button=node('button',row.Title||source?.title||`Paper ${index+1}`,'result-paper');button.setAttribute('aria-pressed',String(source?.paper_id===selected));button.addEventListener('click',()=>{if(source){selected=source.paper_id;followCurrent=false;filter='All papers';render();}});title.append(button);tr.append(title,node('td',row.Collections||source?.collections.join(' · ')||'—'),node('td',labels[row.Status||source?.status]||row.Status||'Saved'),node('td',`${row['Filled Fields']||fields.filter(key=>row[key]&&row[key]!=='N/A').length} / ${fields.length}`),node('td',row['Efficiency (%)']||'N/A'));return tr;}));
@@ -108,20 +121,32 @@ function render() {
   tableScroll.scrollLeft=left;tableScroll.scrollTop=top;
 }
 async function poll() {
-  try {const response=await fetch('/api/state');if(!response.ok)throw new Error('Status unavailable');state=await response.json();$('connection').hidden=true;if(initialView){view(state.csv_available);initialView=false;}render();}
-  catch { $('connection').textContent='Connection lost. Reconnecting to the local dashboard…';$('connection').hidden=false;$('start').disabled=true;$('stop').disabled=true; }
+  const requestedRun=selectedRun;
+  try {
+    const query=requestedRun?`?run_id=${encodeURIComponent(requestedRun)}`:'';
+    const [response,runsResponse]=await Promise.all([fetch('/api/state'+query),fetch('/api/runs')]);
+    if(!response.ok||!runsResponse.ok)throw new Error('Status unavailable');
+    const [snapshot,history]=await Promise.all([response.json(),runsResponse.json()]);
+    if(requestedRun===selectedRun){state=snapshot;savedRuns=history.runs;selectedRun=state.run_id||null;$('connection').hidden=true;if(initialView){view(state.csv_available);initialView=false;}render();}
+  }
+  catch { $('connection').textContent='Connection lost. Reconnecting to the local dashboard…';$('connection').hidden=false;$('start').disabled=true;$('stop').disabled=true;$('resume').disabled=true;$('retry-failed').disabled=true; }
   setTimeout(poll,1500);
 }
 async function action(name, body={}) {
   if(busy)return;busy=true;$('action-error').hidden=true;render();
-  try {const response=await fetch(`/api/${name}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await response.json();if(!response.ok)throw new Error(data.error);state=data;if(name==='start'){followCurrent=true;selected=body.paper_id||null;filter='All papers';view(false);}}
+  try {const response=await fetch(`/api/${name}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await response.json();if(!response.ok)throw new Error(data.error);state=data;selectedRun=data.run_id||null;if(['start','resume','retry-failed'].includes(name)){followCurrent=true;selected=body.paper_id||null;filter='All papers';view(false);}}
   catch(error){$('action-error').textContent=error.message;$('action-error').hidden=false;}
   finally{busy=false;render();}
 }
 $('start').addEventListener('click',()=>action('start'));
 $('start-selected').addEventListener('click',()=>{if(selected)action('start',{paper_id:selected});});
-$('stop').addEventListener('click',()=>action('stop'));
-$('download').addEventListener('click',()=>{const a=node('a');a.href='/api/csv';a.download=state.csv_name;a.click();});
+$('stop').addEventListener('click',()=>action('stop',{run_id:state.active_run_id||state.run_id}));
+$('resume').addEventListener('click',()=>action('resume',{run_id:state.run_id}));
+$('retry-failed').addEventListener('click',()=>action('retry-failed',{run_id:state.run_id}));
+$('saved-run').addEventListener('change',async event=>{selectedRun=event.target.value;selected=null;followCurrent=false;filter='All papers';try{const response=await fetch('/api/state?run_id='+encodeURIComponent(selectedRun));if(!response.ok)throw new Error();const snapshot=await response.json();if(snapshot.run_id===selectedRun){state=snapshot;view(state.csv_available);render();}}catch{$('action-error').textContent='Could not load the saved run. Try again.';$('action-error').hidden=false;}});
+function download(paperId){const query=new URLSearchParams();if(state.run_id)query.set('run_id',state.run_id);if(paperId)query.set('paper_id',paperId);const a=node('a');a.href='/api/csv?'+query.toString();a.download=paperId?'paper.csv':state.csv_name;a.click();}
+$('download').addEventListener('click',()=>download());
+$('download-paper').addEventListener('click',()=>{if(selected)download(selected);});
 function view(results){showingResults=results;$('results-panel').hidden=!results;$('filter-row').hidden=results;$('workspace').classList.toggle('result-detail',results);$('page-title').textContent=results?'Extraction results':'Paper extraction';$('results-view').setAttribute('aria-pressed',String(results));$('extraction-view').setAttribute('aria-pressed',String(!results));}
 $('results-view').addEventListener('click',()=>view(true));
 $('extraction-view').addEventListener('click',()=>view(false));
